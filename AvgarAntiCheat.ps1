@@ -1,7 +1,7 @@
 #Requires -RunAsAdministrator
 $ErrorActionPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$Host.UI.RawUI.WindowTitle = "Avgar AntiCheat | Elite Runtime Scanner"
+$Host.UI.RawUI.WindowTitle = "Avgar AntiCheat | Turbo Runtime Scanner"
 
 $OutputDir = if ($PSScriptRoot) { $PSScriptRoot } else { [Environment]::GetFolderPath('Desktop') }
 
@@ -64,12 +64,40 @@ namespace AvgarEngine {
         };
 
         static readonly string[] Whitelist = new string[] { 
-            "optifine", "sodium", "fabric-api", "forge", "iris", "lithium", "jei" 
+            "optifine", "sodium", "fabric-api", "forge", "iris", "lithium", "jei", "voicechat" 
         };
 
-        public static bool CheckCert(string path) {
-            try { return X509Certificate.CreateFromSignedFile(path) != null; } 
-            catch { return false; }
+        static readonly byte[][] SigBytesLower;
+        static readonly byte[][] CleanerBytesLower;
+
+        static Scanner() {
+            SigBytesLower = Sigs.Select(s => Encoding.ASCII.GetBytes(s.ToLowerInvariant())).ToArray();
+            CleanerBytesLower = Cleaners.Select(c => Encoding.ASCII.GetBytes(c.ToLowerInvariant())).ToArray();
+        }
+
+        static bool ContainsPatternCaseInsensitive(byte[] buffer, int length, byte[] patternLower) {
+            int pLen = patternLower.Length;
+            if (pLen == 0 || length < pLen) return false;
+            int limit = length - pLen;
+            byte first = patternLower[0];
+            byte firstUpper = (first >= 97 && first <= 122) ? (byte)(first - 32) : first;
+
+            for (int i = 0; i <= limit; i++) {
+                byte b = buffer[i];
+                if (b != first && b != firstUpper) continue;
+
+                bool match = true;
+                for (int j = 1; j < pLen; j++) {
+                    byte cb = buffer[i + j];
+                    if (cb >= 65 && cb <= 90) cb += 32;
+                    if (cb != patternLower[j]) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) return true;
+            }
+            return false;
         }
 
         public static List<ScanHit> ScanProcess(int pid) {
@@ -81,54 +109,62 @@ namespace AvgarEngine {
             MBI mbi;
             var seen = new HashSet<string>();
             var sb = new StringBuilder(512);
+            byte[] sharedBuf = new byte[4 * 1024 * 1024];
 
             try {
                 while (VirtualQueryEx(h, (IntPtr)addr, out mbi, (uint)Marshal.SizeOf(typeof(MBI))) != 0) {
                     long size = (long)mbi.RegionSize;
-                    
-                    if (mbi.State == 0x1000 && (mbi.Protect == 0x40 || mbi.Protect == 0x20 || mbi.Protect == 0x80)) {
+                    uint prot = mbi.Protect & 0xFF;
+
+                    // Сканируем ТОЛЬКО исполняемую память (где лежат инжекты и JIT-код) — пропускаем гигабайты чанков/текстур
+                    if (mbi.State == 0x1000 && (prot == 0x10 || prot == 0x20 || prot == 0x40 || prot == 0x80)) {
                         bool unbacked = (mbi.Type == 0x20000 && size >= 4096 && GetMappedFileName(h, mbi.BaseAddress, sb, 512) == 0);
-                        int readSize = (int)Math.Min(size, 32 * 1024 * 1024);
-                        byte[] buf = new byte[readSize];
-                        
+                        int readSize = (int)Math.Min(size, sharedBuf.Length);
+
                         IntPtr read;
-                        if (ReadProcessMemory(h, mbi.BaseAddress, buf, readSize, out read) && (int)read > 0) {
-                            if (unbacked && buf.Length >= 2 && buf[0] == 0x4D && buf[1] == 0x5A) {
+                        if (ReadProcessMemory(h, mbi.BaseAddress, sharedBuf, readSize, out read) && (int)read > 0) {
+                            int len = (int)read;
+
+                            if (unbacked && len >= 2 && sharedBuf[0] == 0x4D && sharedBuf[1] == 0x5A) {
                                 string key = "PE_" + mbi.BaseAddress;
                                 if (seen.Add(key)) {
-                                    hits.Add(new ScanHit { 
-                                        Severity = "CRITICAL", 
-                                        Type = "Manual Map Inject (Unbacked PE)", 
-                                        Target = string.Format("PID:{0}@0x{1:X}", pid, (long)mbi.BaseAddress), 
-                                        Details = "Исполняемый PE-файл в памяти без файла на диске (Лоадер)" 
+                                    hits.Add(new ScanHit {
+                                        Severity = "CRITICAL",
+                                        Type = "Manual Map Inject (Unbacked PE)",
+                                        Target = string.Format("PID:{0}@0x{1:X}", pid, (long)mbi.BaseAddress),
+                                        Details = "Исполняемый PE-файл в памяти без файла на диске (Лоадер)"
                                     });
                                 }
                             }
 
-                            string text = Encoding.ASCII.GetString(buf, 0, (int)read);
-                            foreach (var s in Sigs) {
-                                if (text.IndexOf(s, StringComparison.OrdinalIgnoreCase) >= 0 && seen.Add(s)) {
-                                    hits.Add(new ScanHit { 
-                                        Severity = "CRITICAL", 
-                                        Type = "Сигнатура Чита (Память)", 
-                                        Target = string.Format("PID:{0}", pid), 
-                                        Details = string.Format("Найдено: {0}", s) 
+                            for (int idx = 0; idx < SigBytesLower.Length; idx++) {
+                                if (!seen.Contains(Sigs[idx]) && ContainsPatternCaseInsensitive(sharedBuf, len, SigBytesLower[idx])) {
+                                    seen.Add(Sigs[idx]);
+                                    hits.Add(new ScanHit {
+                                        Severity = "CRITICAL",
+                                        Type = "Сигнатура Чита (Память)",
+                                        Target = string.Format("PID:{0}", pid),
+                                        Details = string.Format("Найдено: {0}", Sigs[idx])
                                     });
                                 }
                             }
-                            foreach (var c in Cleaners) {
-                                if (text.IndexOf(c, StringComparison.OrdinalIgnoreCase) >= 0 && seen.Add(c)) {
-                                    hits.Add(new ScanHit { 
-                                        Severity = "CRITICAL", 
-                                        Type = "Сигнатура Клинера", 
-                                        Target = string.Format("PID:{0}", pid), 
-                                        Details = string.Format("Найдено: {0}", c) 
+
+                            for (int idx = 0; idx < CleanerBytesLower.Length; idx++) {
+                                if (!seen.Contains(Cleaners[idx]) && ContainsPatternCaseInsensitive(sharedBuf, len, CleanerBytesLower[idx])) {
+                                    seen.Add(Cleaners[idx]);
+                                    hits.Add(new ScanHit {
+                                        Severity = "CRITICAL",
+                                        Type = "Сигнатура Клинера",
+                                        Target = string.Format("PID:{0}", pid),
+                                        Details = string.Format("Найдено: {0}", Cleaners[idx])
                                     });
                                 }
                             }
                         }
                     }
-                    addr = (long)mbi.BaseAddress + size;
+                    long next = (long)mbi.BaseAddress + size;
+                    if (next <= addr || next > 0x7FFFFFFFFFFF) break;
+                    addr = next;
                 }
             } finally { CloseHandle(h); }
             return hits;
@@ -150,37 +186,37 @@ namespace AvgarEngine {
                     using (var zip = new ZipArchive(fs, ZipArchiveMode.Read)) {
                         var traits = new List<string>();
                         foreach (var ent in zip.Entries) {
-                            if (!ent.FullName.EndsWith(".class") || ent.FullName.StartsWith("org/lwjgl")) continue;
-                            
+                            if (!ent.FullName.EndsWith(".class") || ent.FullName.StartsWith("org/lwjgl") || ent.FullName.StartsWith("io/netty")) continue;
+
                             using (var ms = new MemoryStream()) {
                                 ent.Open().CopyTo(ms);
                                 string code = Encoding.ASCII.GetString(ms.ToArray());
-                                
+
                                 foreach (var s in Sigs) {
                                     if (code.IndexOf(s, StringComparison.OrdinalIgnoreCase) >= 0 && !traits.Contains(s)) {
                                         traits.Add(string.Format("SIG:{0}", s));
                                     }
                                 }
-                                
+
                                 if (code.Contains("spongepowered/asm/mixin") || code.Contains("java/lang/reflect")) {
                                     if (code.Contains("AxisAlignedBB") && code.Contains("expand(") && code.Contains("EntityPlayer")) {
-                                        if(!traits.Contains("ASM_HITBOX_EXPANDER")) traits.Add("ASM_HITBOX_EXPANDER");
+                                        if (!traits.Contains("ASM_HITBOX_EXPANDER")) traits.Add("ASM_HITBOX_EXPANDER");
                                     }
                                     if (code.Contains("getBlockReachDistance") && code.Contains("ModifyReturnValue")) {
-                                        if(!traits.Contains("ASM_REACH")) traits.Add("ASM_REACH");
+                                        if (!traits.Contains("ASM_REACH")) traits.Add("ASM_REACH");
                                     }
                                     if (code.Contains("C02PacketUseEntity") && code.Contains("onTick")) {
-                                        if(!traits.Contains("ASM_KILLAURA_TICK")) traits.Add("ASM_KILLAURA_TICK");
+                                        if (!traits.Contains("ASM_KILLAURA_TICK")) traits.Add("ASM_KILLAURA_TICK");
                                     }
                                 }
                             }
                         }
                         if (traits.Count > 0) {
-                            hits.Add(new ScanHit { 
-                                Severity = "CRITICAL", 
-                                Type = "Вмешательство в байт-код JAR", 
-                                Target = path, 
-                                Details = string.Join(", ", traits.ToArray()) 
+                            hits.Add(new ScanHit {
+                                Severity = "CRITICAL",
+                                Type = "Вмешательство в байт-код JAR",
+                                Target = path,
+                                Details = string.Join(", ", traits.ToArray())
                             });
                         }
                     }
@@ -239,10 +275,10 @@ foreach ($sd in $SearchDirs) {
     }
 }
 
-$DiskMult = if ($DiskType -match "HDD") { 2.5 } else { 1.0 }
-$CpuMult = if ($CpuCores -ge 12) { 0.6 } elseif ($CpuCores -ge 8) { 0.8 } else { 1.2 }
-$TotalEstSec = [Math]::Ceiling((($JavawMem / 500) * $CpuMult) + ($JarFiles.Count * 0.15 * $DiskMult) + 3.0)
-if ($TotalEstSec -lt 4) { $TotalEstSec = 4 }
+$DiskMult = if ($DiskType -match "HDD") { 2.0 } else { 1.0 }
+$CpuMult = if ($CpuCores -ge 8) { 0.5 } else { 1.0 }
+$TotalEstSec = [Math]::Ceiling((($JavawMem / 2500) * $CpuMult) + ($JarFiles.Count * 0.02 * $DiskMult) + 1.5)
+if ($TotalEstSec -lt 2) { $TotalEstSec = 2 }
 
 $Sw = [System.Diagnostics.Stopwatch]::StartNew()
 $Hits = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -278,14 +314,14 @@ foreach ($jp in $JavawProcs) {
     foreach ($r in $Res) { Register-Hit $r.Severity $r.Type $r.Target $r.Details }
 }
 
-Update-UI "Многопоточный анализ байт-кода .jar..." 40
+Update-UI "Многопоточный анализ байт-кода .jar..." 45
 
 if ($JarFiles.Count -gt 0) {
     $JarRes = [AvgarEngine.Scanner]::ScanJarsParallel($JarFiles.ToArray())
     foreach ($r in $JarRes) { Register-Hit $r.Severity $r.Type $r.Target $r.Details }
 }
 
-Update-UI "Проверка форензики и логов ОС..." 75
+Update-UI "Проверка форензики и логов ОС..." 80
 
 $Regex = '(SystemDLC|Cortex|MHub|SS_Cleaner|AveyCleaner|OceanCleaner|ViperCleaner|PrefetchCleaner)'
 
@@ -322,7 +358,7 @@ if ($Usn -match 'Error|not active|ошиб|активен') { Register-Hit "CRIT
 
 Update-UI "Генерация финального отчета..." 100
 $Sw.Stop()
-Start-Sleep -Seconds 1
+Start-Sleep -Milliseconds 300
 Clear-Host
 
 # ----------------- ВЫВОД -----------------
@@ -335,7 +371,7 @@ if ($Hits.Count -eq 0) {
 } else {
     Write-Host "`n DETECTIONS LOG:`n" -ForegroundColor Red
     foreach ($h in ($Hits | Select-Object -Unique Type, Target, Details)) {
-        Write-Host " [${h.Level}] ${h.Type}" -ForegroundColor Red
+        Write-Host " [$($h.Level)] $($h.Type)" -ForegroundColor Red
         Write-Host "  ГДЕ    : $($h.Target)" -ForegroundColor Gray
         Write-Host "  ДЕТАЛИ : $($h.Details)`n" -ForegroundColor DarkGray
     }
