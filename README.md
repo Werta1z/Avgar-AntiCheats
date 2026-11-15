@@ -11,5 +11,5 @@ High-speed, zero-dependency forensic and runtime memory scanner for Minecraft sc
 ## Quick Launch
 Open **PowerShell as Administrator** and run:
 
-```powershell
-irm "[https://raw.githubusercontent.com/Werta1z/Avgar-AntiCheats/main/AvgarAntiCheat.ps1](https://raw.githubusercontent.com/Werta1z/Avgar-AntiCheats/main/AvgarAntiCheat.ps1)" | iex
+```powershell - paste txt
+
