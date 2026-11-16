@@ -700,7 +700,7 @@ if (Test-Path $BamKey) {
         foreach ($p in $props.PSObject.Properties) {
             if ($p.Name -match $FullCheatRx) {
                 $tStr = "Неизвестно"
-                if ($p.Value is [byte[]] and $p.Value.Length -ge 8) {
+                if ($p.Value -is [byte[]] -and $p.Value.Length -ge 8) {
                     $ft = [BitConverter]::ToInt64($p.Value, 0)
                     if ($ft -gt 0) { $tStr = [DateTime]::FromFileTime($ft).ToString("dd.MM.yyyy HH:mm:ss") }
                 }
