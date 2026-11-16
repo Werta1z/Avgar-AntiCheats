@@ -23,7 +23,7 @@ namespace AvgarCore
 {
     public class AuditRecord
     {
-        public string Severity { get; set; } // RED, YELLOW, GREEN
+        public string Severity { get; set; }
         public string Sector { get; set; }
         public string Title { get; set; }
         public string Target { get; set; }
@@ -600,7 +600,7 @@ if ($FileArray.Count -gt 0) {
 Render-TimerScreen -Percent 70
 $CmdDangerRx = '(bytes\.fromhex|VirtualAlloc|WriteProcessMemory|CreateRemoteThread|ctypes|windll|138\.16\.176\.212|78\.40\.193\.175|IPT1|9543|Invoke-Expression|\biex\b|DownloadString|DownloadData|FromBase64String|amsiInitFailed|Set-MpPreference|wevtutil|usn\s+deletejournal|taskkill\s+/f|SystemDLC|MHub|Cortex|EverDLC|SS_Cleaner|AveyCleaner)'
 
-# 3.1 Глубокий поиск Python IDLE (история, конфигурация, кэш)
+# 3.1 Глубокий поиск Python IDLE
 $IdleDir = Join-Path $env:USERPROFILE ".idlerc"
 if (Test-Path $IdleDir) {
     $histFile = Join-Path $IdleDir "history.lst"
@@ -631,9 +631,9 @@ if (Test-Path $IdleDir) {
     }
 }
 
-# Поиск .py и .pyw файлов по всему ПК, содержащих следы шеллкодов или сетевых запросов
-Get-ChildItem -Path "C:\" -Include "*.py", "*.pyw" -Recurse -File -ErrorAction SilentlyContinue | Where-Object {
-    $_.FullName -notmatch "\\Windows\\|\\AppData\\Local\\Programs\\Python\\"
+# Поиск .py и .pyw файлов по профилю пользователя
+Get-ChildItem -Path $env:USERPROFILE -Include "*.py", "*.pyw" -Recurse -File -ErrorAction SilentlyContinue | Where-Object {
+    $_.FullName -notmatch "\\AppData\\Local\\Programs\\Python\\"
 } | ForEach-Object {
     try {
         $pyContent = Get-Content -LiteralPath $_.FullName -Raw -ErrorAction SilentlyContinue
@@ -649,7 +649,7 @@ if (Test-Path $PsHistPath) {
     $psLines = Get-Content $PsHistPath -ErrorAction SilentlyContinue | Select-Object -Last 100
     foreach ($pl in $psLines) {
         if ([string]::IsNullOrWhiteSpace($pl)) { continue }
-        if ($pl -match $CmdDangerRx -and $pl -notmatch 'AvgarAntiCheat') {
+        if ($pl -match $CmdDangerRx -and $pl -notmatch 'AvgarAntiCheat|dsd\.ps1') {
             Add-Record -Severity "RED" -Sector "История терминалов (Python IDLE / PS / CMD)" -Title "Подозрительная команда в истории PowerShell" -Target "ConsoleHost_history.txt" -Evidence "Команда: $pl"
         }
     }
@@ -666,7 +666,7 @@ $Ev4104 = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-PowerShe
 foreach ($ev in $Ev4104) {
     if ($ev.ProcessId -eq $PID) { continue }
     $msg = $ev.Message
-    if ($msg -match 'AvgarCore|AvgarAntiCheat') { continue }
+    if ($msg -match 'AvgarCore|AvgarAntiCheat|dsd\.ps1') { continue }
     if ($msg -match $CmdDangerRx) {
         $snippet = ($msg -replace '\s+', ' ').Trim()
         if ($snippet.Length -gt 220) { $snippet = $snippet.Substring(0, 220) + "..." }
@@ -702,7 +702,9 @@ if (Test-Path $BamKey) {
                 $tStr = "Неизвестно"
                 if ($p.Value -is [byte[]] -and $p.Value.Length -ge 8) {
                     $ft = [BitConverter]::ToInt64($p.Value, 0)
-                    if ($ft -gt 0) { $tStr = [DateTime]::FromFileTime($ft).ToString("dd.MM.yyyy HH:mm:ss") }
+                    if ($ft -gt 0) {
+                        $tStr = [DateTime]::FromFileTime($ft).ToString("dd.MM.yyyy HH:mm:ss")
+                    }
                 }
                 Add-Record -Severity "RED" -Sector "Форензика ОС и сеть" -Title "Запуск запрещенного ПО зафиксирован в реестре BAM" -Target $p.Name -Evidence "Время запуска: $tStr"
             }
