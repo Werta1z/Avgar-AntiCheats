@@ -1,7 +1,7 @@
 #Requires -RunAsAdministrator
 $ErrorActionPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$Host.UI.RawUI.WindowTitle = "Avgar AntiCheat | Forensic & Runtime Scanner"
+$Host.UI.RawUI.WindowTitle = "Avgar AntiCheat | Elite Forensic Scanner"
 
 $OutputDir = if ($PSScriptRoot) { $PSScriptRoot } else { [Environment]::GetFolderPath('Desktop') }
 
@@ -59,7 +59,6 @@ namespace AvgarCore
             public uint Type;
         }
 
-        // Расширенная база клиентов, лоадеров и инжекторов
         static readonly string[] CheatSignatures = new string[]
         {
             "SystemDLC", "system-dlc", "sysdlc", "MHub", "mhub_loader", "Cortex.dll", "CortexClient",
@@ -75,11 +74,9 @@ namespace AvgarCore
             "GishCode", "Baritone", "Fabaritone", "Jigsaw", "RusherHack", "Konas", "WintWare",
             "NoRules", "Eternity", "BoberWare", "BebraWare", "Minced", "DreamPool", "Dauntiblyat",
             "Gumballoff", "TopkaAutoBuy", "XorekAutoBuy", "Zenith", "Horizen", "Toffi", "LiquidLauncher",
-            // Сигнатуры шеллкод-лоадера из Python (IPT1 / C2 IP / payload)
             "138.16.176.212", "78.40.193.175", "IPT1", "696d706f727420637479706573"
         };
 
-        // Сигнатуры клинеров, спуферов и утилит сокрытия
         static readonly string[] CleanerSignatures = new string[]
         {
             "SS_Cleaner", "TraceCleaner", "USNJournalCleaner", "PrefetchCleaner", "BAMCleaner",
@@ -89,7 +86,6 @@ namespace AvgarCore
             "JournalTrace", "ExecutedProgramsList", "LastActivityView", "SystemInformer", "ProcessHacker"
         };
 
-        // Частицы кода читов, инжекторов и клинеров для глубокого поиска по файлам
         static readonly string[] CodeFragmentSignatures = new string[]
         {
             "VirtualAllocEx", "WriteProcessMemory", "CreateRemoteThread", "NtCreateThreadEx",
@@ -463,7 +459,7 @@ try {
     exit
 }
 
-# --- СБОР ДАННЫХ О ЖЕЛЕЗЕ (CPU, GPU, RAM, DISK) ---
+# --- СБОР ДАННЫХ О ЖЕЛЕЗЕ ---
 $CpuInfo = Get-CimInstance Win32_Processor | Select-Object -First 1
 $GpuInfo = (Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name) -join ", "
 $CpuCores = [Environment]::ProcessorCount
@@ -478,7 +474,7 @@ $JavawProcs = Get-Process "javaw", "java" -ErrorAction SilentlyContinue
 $JavawMem = 0
 foreach ($p in $JavawProcs) { $JavawMem += ($p.WorkingSet64 / 1MB) }
 
-# --- СБОР ФАЙЛОВ ПО ВСЕМ ДИСКАМ И ПАПКАМ ПОЛЬЗОВАТЕЛЯ ---
+# --- СБОР ФАЙЛОВ ---
 $FilesToScan = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 $TargetRoots = @(
     (Join-Path $env:APPDATA ".minecraft"),
@@ -503,7 +499,7 @@ foreach ($root in $TargetRoots) {
 
 $FileArray = $FilesToScan.ToArray()
 
-# --- КАЛИБРОВКА ТАЙМЕРА ПОД ЖЕЛЕЗО ---
+# --- КАЛИБРОВКА ТАЙМЕРА ---
 $DiskFactor = if ($DiskType -match "HDD") { 2.2 } else { 1.0 }
 $CoreFactor = [Math]::Max(0.5, 8.0 / [Math]::Max(2, $CpuCores))
 $GpuFactor  = if ($GpuInfo -match "Microsoft Basic|VMware|VirtualBox") { 1.3 } else { 1.0 }
@@ -562,10 +558,9 @@ function Render-TimerScreen {
 Clear-Host
 Render-TimerScreen -Percent 5
 
-# Записываем информацию о железе в зеленый сектор
 Add-Record -Severity "GREEN" -Sector "Система и сессии Minecraft" -Title "Конфигурация оборудования ПК" -Target "$env:COMPUTERNAME" -Evidence "CPU: $($CpuInfo.Name.Trim()) ($CpuCores ядер) | GPU: $GpuInfo | RAM: $TotalRam ГБ | Диск: $DiskType"
 
-# --- 1. СКАНИРОВАНИЕ ПАМЯТИ ПРОЦЕССОВ (JAVAW, PYTHON, EXPLORER) ---
+# --- 1. СКАНИРОВАНИЕ ПАМЯТИ ---
 $ProcsToAudit = Get-Process -Name "javaw", "java", "python", "pythonw" -ErrorAction SilentlyContinue
 $pIdx = 0
 $pTotal = ($ProcsToAudit | Measure-Object).Count
@@ -587,7 +582,7 @@ foreach ($pr in $ProcsToAudit) {
     }
 }
 
-# --- 2. МНОГОПОТОЧНЫЙ ПОИСК ЧАСТИЦ КОДА ПО ФАЙЛАМ ---
+# --- 2. МНОГОПОТОЧНЫЙ ПОИСК ПО ФАЙЛАМ ---
 Render-TimerScreen -Percent 25
 if ($FileArray.Count -gt 0) {
     $cb = {
@@ -601,26 +596,26 @@ if ($FileArray.Count -gt 0) {
     }
 }
 
-# --- 3. ИСТОРИЯ PYTHON IDLE, POWERSHELL И CMD (ВЫВОД САМИХ КОМАНД) ---
+# --- 3. ИСТОРИЯ PYTHON IDLE, POWERSHELL И CMD ---
 Render-TimerScreen -Percent 70
 $CmdDangerRx = '(bytes\.fromhex|VirtualAlloc|WriteProcessMemory|CreateRemoteThread|ctypes|windll|138\.16\.176\.212|78\.40\.193\.175|IPT1|9543|Invoke-Expression|\biex\b|DownloadString|DownloadData|FromBase64String|amsiInitFailed|Set-MpPreference|wevtutil|usn\s+deletejournal|taskkill\s+/f|SystemDLC|MHub|Cortex|EverDLC|SS_Cleaner|AveyCleaner)'
 
-# 3.1 Python IDLE (.idlerc)
+# 3.1 Глубокий поиск Python IDLE (история, конфигурация, кэш)
 $IdleDir = Join-Path $env:USERPROFILE ".idlerc"
 if (Test-Path $IdleDir) {
     $histFile = Join-Path $IdleDir "history.lst"
     if (Test-Path $histFile) {
-        $idleLines = Get-Content $histFile -ErrorAction SilentlyContinue | Select-Object -Last 60
+        $idleLines = Get-Content $histFile -ErrorAction SilentlyContinue | Select-Object -Last 100
         $allIdleText = ($idleLines -join " | ")
         foreach ($line in $idleLines) {
             if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            if ($line -match $CmdDangerRx) {
-                Add-Record -Severity "RED" -Sector "История терминалов (Python IDLE / PS / CMD)" -Title "Обнаружен код инжектора / лоадера в истории Python IDLE" -Target "Python IDLE (history.lst)" -Evidence "Введенный код: $line"
+            if ($line -match $CmdDangerRx -or $line -match '(import\s+socket|urllib|ssl|ctypes|exec|eval)') {
+                Add-Record -Severity "RED" -Sector "История терминалов (Python IDLE / PS / CMD)" -Title "Подозрительный код / следы лоадера в истории Python IDLE" -Target "Python IDLE (history.lst)" -Evidence "Код: $line"
             }
         }
         if ($idleLines.Count -gt 0) {
             $preview = if ($allIdleText.Length -gt 240) { $allIdleText.Substring($allIdleText.Length - 240) } else { $allIdleText }
-            Add-Record -Severity "GREEN" -Sector "История терминалов (Python IDLE / PS / CMD)" -Title "Последние команды в Python IDLE ($($idleLines.Count) строк)" -Target "Python IDLE" -Evidence $preview
+            Add-Record -Severity "GREEN" -Sector "История терминалов (Python IDLE / PS / CMD)" -Title "История Python IDLE обнаружена ($($idleLines.Count) строк)" -Target "Python IDLE" -Evidence $preview
         }
     }
 
@@ -628,18 +623,30 @@ if (Test-Path $IdleDir) {
     if (Test-Path $recentIdle) {
         $rFiles = Get-Content $recentIdle -ErrorAction SilentlyContinue
         foreach ($rf in $rFiles) {
-            if ($rf -match '(SystemDLC|MHub|Cortex|loader|inject|cheat|bypass|\.py)') {
+            if ($rf -match '(SystemDLC|MHub|Cortex|loader|inject|cheat|bypass|\.py|\.pyw)') {
                 $sev = if ($rf -match '(SystemDLC|MHub|Cortex|inject|bypass)') { "RED" } else { "YELLOW" }
-                Add-Record -Severity $sev -Sector "История терминалов (Python IDLE / PS / CMD)" -Title "Файл, открывавшийся в Python IDLE" -Target "recent-files.lst" -Evidence "Путь: $rf"
+                Add-Record -Severity $sev -Sector "История терминалов (Python IDLE / PS / CMD)" -Title "Скрипт Python, запускавшийся в IDLE" -Target "recent-files.lst" -Evidence "Путь: $rf"
             }
         }
     }
 }
 
-# 3.2 PowerShell (ConsoleHost_history.txt + Event ID 4104 даже если файл истории удален)
+# Поиск .py и .pyw файлов по всему ПК, содержащих следы шеллкодов или сетевых запросов
+Get-ChildItem -Path "C:\" -Include "*.py", "*.pyw" -Recurse -File -ErrorAction SilentlyContinue | Where-Object {
+    $_.FullName -notmatch "\\Windows\\|\\AppData\\Local\\Programs\\Python\\"
+} | ForEach-Object {
+    try {
+        $pyContent = Get-Content -LiteralPath $_.FullName -Raw -ErrorAction SilentlyContinue
+        if ($pyContent -match '(bytes\.fromhex|VirtualAlloc|CreateThread|9543|IPT1|socket\.connect)') {
+            Add-Record -Severity "RED" -Sector "История терминалов (Python IDLE / PS / CMD)" -Title "Найден файл Python-инжектора / лоадера на диске" -Target $_.FullName -Evidence "Содержит сигнатуры шеллкода"
+        }
+    } catch {}
+}
+
+# 3.2 PowerShell (ConsoleHost_history.txt)
 $PsHistPath = Join-Path $env:APPDATA "Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt"
 if (Test-Path $PsHistPath) {
-    $psLines = Get-Content $PsHistPath -ErrorAction SilentlyContinue | Select-Object -Last 80
+    $psLines = Get-Content $PsHistPath -ErrorAction SilentlyContinue | Select-Object -Last 100
     foreach ($pl in $psLines) {
         if ([string]::IsNullOrWhiteSpace($pl)) { continue }
         if ($pl -match $CmdDangerRx -and $pl -notmatch 'AvgarAntiCheat') {
@@ -648,13 +655,13 @@ if (Test-Path $PsHistPath) {
     }
     if ($psLines.Count -gt 0) {
         $lastPs = ($psLines | Select-Object -Last 10) -join " ; "
-        Add-Record -Severity "GREEN" -Sector "История терминалов (Python IDLE / PS / CMD)" -Title "Последние 10 команд PowerShell" -Target "ConsoleHost_history.txt" -Evidence $lastPs
+        Add-Record -Severity "GREEN" -Sector "История терминалов (Python IDLE / PS / CMD)" -Title "Последние команды PowerShell" -Target "ConsoleHost_history.txt" -Evidence $lastPs
     }
 } else {
     Add-Record -Severity "YELLOW" -Sector "История терминалов (Python IDLE / PS / CMD)" -Title "Файл истории PowerShell отсутствует или был удален (50/50)" -Target "PSReadLine" -Evidence "ConsoleHost_history.txt не найден"
 }
 
-# Восстановление удаленной истории PowerShell из журнала Event ID 4104
+# Журнал Event ID 4104 (PowerShell Operational)
 $Ev4104 = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-PowerShell/Operational'; Id = 4104 } -MaxEvents 150 -ErrorAction SilentlyContinue
 foreach ($ev in $Ev4104) {
     if ($ev.ProcessId -eq $PID) { continue }
@@ -667,26 +674,11 @@ foreach ($ev in $Ev4104) {
     }
 }
 
-# 3.3 CMD и запуски процессов (Event ID 4688 + RunMRU)
-$Ev4688 = Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 4688 } -MaxEvents 300 -ErrorAction SilentlyContinue
-foreach ($ev in $Ev4688) {
-    if ($ev.Message -match '(cmd\.exe|pythonw?\.exe|powershell\.exe)') {
-        if ($ev.Message -match $CmdDangerRx -and $ev.Message -notmatch 'AvgarAntiCheat') {
-            $cmdLine = ""
-            if ($ev.Message -match '(?:Command Line|Командная строка процесса):\s*(.+)') { $cmdLine = $Matches[1].Trim() }
-            if ($cmdLine) {
-                Add-Record -Severity "RED" -Sector "История терминалов (Python IDLE / PS / CMD)" -Title "Зафиксирована опасная команда CMD / Python (Event 4688)" -Target "Время: $($ev.TimeCreated.ToString('dd.MM.yyyy HH:mm:ss'))" -Evidence "Команда: $cmdLine"
-            }
-        }
-    }
-}
-
-# --- 4. ФОРЕНЗИКА ОС, СЕТЬ, РЕЕСТР И СЛУЖБЫ ---
+# --- 4. ФОРЕНЗИКА ОС И СЕТЬ ---
 Render-TimerScreen -Percent 85
 
 $FullCheatRx = '(SystemDLC|Cortex|MHub|EverDLC|Nursultan|Celestial|Expensive|Wexside|Rich|Akrien|Vape|Doomsday|ExLoader|LunarPatcher|WildClient|Mytheria|Wexium|DeltaClient|Catlavan|SS_Cleaner|TraceCleaner|AveyCleaner|OceanCleaner|EchoCleaner|ViperCleaner|Chameleon|ModFaker|USBOblivion|shellbag_analyzer|JournalTrace|WinPrefetchView|SystemInformer)'
 
-# 4.1 DNS-кэш (включая IP из Python-инжектора)
 $DnsRaw = ipconfig /displaydns 2>&1 | Out-String
 foreach ($netSig in @("systemdlc", "mhub", "cortex", "everdlc", "vape.gg", "manthe.net", "slinky.gg", "138.16.176.212", "78.40.193.175")) {
     if ($DnsRaw -match [regex]::Escape($netSig)) {
@@ -694,26 +686,13 @@ foreach ($netSig in @("systemdlc", "mhub", "cortex", "everdlc", "vape.gg", "mant
     }
 }
 
-# 4.2 USN Journal и недавно удаленные файлы (48 часов)
 $UsnQuery = fsutil usn queryjournal C: 2>&1 | Out-String
 if ($UsnQuery -notmatch "Usn Journal ID") {
     Add-Record -Severity "RED" -Sector "Форензика ОС и сеть" -Title "Журнал файловой системы USN Journal отключен или уничтожен" -Target "Диск C:" -Evidence "Признак работы SS-клинера"
 } else {
     Add-Record -Severity "GREEN" -Sector "Форензика ОС и сеть" -Title "Статус журнала NTFS USN Journal" -Target "Диск C:" -Evidence "Активен и ведет запись"
-    if ($UsnQuery -match 'First Usn\s*:\s*(0x[0-9a-fA-F]+)') {
-        $fUsn = [Convert]::ToInt64($Matches[1].Substring(2), 16)
-        $delLogs = cmd /c "fsutil usn readjournal C: startusn=$fUsn csv | findstr /i /c:""0x80000200"" /c:""File Delete""" 2>$null | Select-Object -Last 200
-        foreach ($dl in $delLogs) {
-            if ($dl -match $FullCheatRx) {
-                $parts = $dl -split '","'
-                $fn = if ($parts.Count -ge 2) { $parts[1].Trim('"') } else { $dl }
-                Add-Record -Severity "RED" -Sector "Форензика ОС и сеть" -Title "Удаленный чит / клинер восстановлен из USN Journal" -Target "NTFS USN" -Evidence "Файл: $fn"
-            }
-        }
-    }
 }
 
-# 4.3 BAM Registry
 $BamKey = "HKLM:\SYSTEM\CurrentControlSet\Services\bam\State\UserSettings"
 if (Test-Path $BamKey) {
     Get-ChildItem $BamKey -ErrorAction SilentlyContinue | ForEach-Object {
@@ -721,7 +700,7 @@ if (Test-Path $BamKey) {
         foreach ($p in $props.PSObject.Properties) {
             if ($p.Name -match $FullCheatRx) {
                 $tStr = "Неизвестно"
-                if ($p.Value -is [byte[]] -and $p.Value.Length -ge 8) {
+                if ($p.Value is [byte[]] and $p.Value.Length -ge 8) {
                     $ft = [BitConverter]::ToInt64($p.Value, 0)
                     if ($ft -gt 0) { $tStr = [DateTime]::FromFileTime($ft).ToString("dd.MM.yyyy HH:mm:ss") }
                 }
@@ -731,7 +710,6 @@ if (Test-Path $BamKey) {
     }
 }
 
-# 4.4 Prefetch
 if (Test-Path "C:\Windows\Prefetch") {
     $pfFiles = Get-ChildItem "C:\Windows\Prefetch" -Filter "*.pf" -ErrorAction SilentlyContinue
     if ($pfFiles.Count -lt 15) {
@@ -742,7 +720,6 @@ if (Test-Path "C:\Windows\Prefetch") {
     }
 }
 
-# 4.5 Корзина (Recycle Bin)
 $Shell = New-Object -ComObject Shell.Application
 $Bin = $Shell.Namespace(10)
 $binCount = 0
@@ -754,31 +731,11 @@ foreach ($item in $Bin.Items()) {
 }
 Add-Record -Severity "GREEN" -Sector "Форензика ОС и сеть" -Title "Состояние Корзины Windows" -Target "Recycle Bin" -Evidence "Элементов в корзине: $binCount"
 
-# 4.6 USB накопители
-$UsbDevs = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Enum\USBSTOR\*\*" -ErrorAction SilentlyContinue
-foreach ($u in $UsbDevs) {
-    if ($u.FriendlyName) {
-        Add-Record -Severity "YELLOW" -Sector "Форензика ОС и сеть" -Title "История подключения USB-накопителя (50/50)" -Target "USBSTOR" -Evidence "Устройство: $($u.FriendlyName)"
-    }
-}
-
-# 4.7 Службы
-foreach ($svc in @("SysMain", "DPS", "EventLog", "DiagTrack")) {
-    $sObj = Get-CimInstance Win32_Service -Filter "Name = '$svc'" -ErrorAction SilentlyContinue
-    if ($sObj) {
-        if ($sObj.State -ne "Running") {
-            Add-Record -Severity "RED" -Sector "Форензика ОС и сеть" -Title "Критическая служба логирования остановлена" -Target "Служба $svc" -Evidence "Статус: $($sObj.State)"
-        } else {
-            Add-Record -Severity "GREEN" -Sector "Форензика ОС и сеть" -Title "Служба $svc работает штатно" -Target "Service" -Evidence "Статус: Running"
-        }
-    }
-}
-
 Render-TimerScreen -Percent 100
 $GlobalTimer.Stop()
 Start-Sleep -Milliseconds 350
 
-# --- СОХРАНЕНИЕ ПОЛНОГО ОТЧЕТА В ФАЙЛ ---
+# --- СОХРАНЕНИЕ ОТЧЕТА ---
 $OutFile = Join-Path $OutputDir "Avgar_Audit_$(Get-Date -Format 'yyyy-MM-dd_HH-mm').txt"
 $LogBuilder = [System.Text.StringBuilder]::new()
 [void]$LogBuilder.AppendLine("AVGAR ANTICHEAT | FULL AUDIT REPORT ($(Get-Date -Format 'dd.MM.yyyy HH:mm:ss'))")
@@ -788,7 +745,7 @@ foreach ($rec in $Records) {
 }
 $LogBuilder.ToString() | Out-File -FilePath $OutFile -Encoding UTF8
 
-# --- ИНТЕРАКТИВНОЕ ОКНО ПРОСМОТРА СЕКТОРОВ ---
+# --- ИНТЕРАКТИВНОЕ МЕНЮ СЕКТОРОВ ---
 $Sectors = @(
     "Память и инъекции",
     "Анализ модов и файлов",
