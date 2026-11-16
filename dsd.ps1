@@ -1,0 +1,862 @@
+#Requires -RunAsAdministrator
+$ErrorActionPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$Host.UI.RawUI.WindowTitle = "Avgar AntiCheat | Forensic & Runtime Scanner"
+
+$OutputDir = if ($PSScriptRoot) { $PSScriptRoot } else { [Environment]::GetFolderPath('Desktop') }
+
+$EngineCode = @"
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.IO.Compression;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace AvgarCore
+{
+    public class AuditRecord
+    {
+        public string Severity { get; set; } // RED, YELLOW, GREEN
+        public string Sector { get; set; }
+        public string Title { get; set; }
+        public string Target { get; set; }
+        public string Evidence { get; set; }
+    }
+
+    public static class Scanner
+    {
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool ReadProcessMemory(IntPtr hProc, IntPtr baseAddr, [Out] byte[] buf, int size, out IntPtr read);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern int VirtualQueryEx(IntPtr hProc, IntPtr addr, out MBI buf, uint len);
+
+        [DllImport("psapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        static extern uint GetMappedFileName(IntPtr hProc, IntPtr lpv, StringBuilder lpFile, uint nSize);
+
+        [DllImport("kernel32.dll")]
+        static extern bool CloseHandle(IntPtr h);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MBI
+        {
+            public IntPtr BaseAddress;
+            public IntPtr AllocationBase;
+            public uint AllocationProtect;
+            public IntPtr RegionSize;
+            public uint State;
+            public uint Protect;
+            public uint Type;
+        }
+
+        // Расширенная база клиентов, лоадеров и инжекторов
+        static readonly string[] CheatSignatures = new string[]
+        {
+            "SystemDLC", "system-dlc", "sysdlc", "MHub", "mhub_loader", "Cortex.dll", "CortexClient",
+            "EverDLC", "Nursultan", "Nurik", "Celestial", "Calestial", "Celka", "Expensive", "Wexside",
+            "RichClient", "RichPremium", "Akrien", "DeadCode", "NeverHook", "Wexium", "Mytheria",
+            "WildClient", "ThunderHack", "MeteorClient", "ImpactClient", "SigmaClient", "LiquidBounce",
+            "Vape_V4", "VapeLite", "Doomsday", "Slinky", "Entropy", "ExLoader", "LunarPatcher",
+            "HitboxExpander", "atributswap", "walksycustom", "Catlavan", "DeltaClient", "Zamorozka",
+            "Boze", "Mathax", "JexClient", "Ketamine", "DripLite", "Nightmares", "FDPClient",
+            "RiseClient", "CryptClient", "Bape", "Koid", "DreamClient", "Whiteout", "SkilledClient",
+            "Itami", "Kura", "BleachHack", "Inertia", "AresClient", "KamiBlue", "Seppuku", "SalHack",
+            "PyroClient", "WurstClient", "Aristois", "FluxClient", "Exhibition", "Dortware", "Zeroday",
+            "GishCode", "Baritone", "Fabaritone", "Jigsaw", "RusherHack", "Konas", "WintWare",
+            "NoRules", "Eternity", "BoberWare", "BebraWare", "Minced", "DreamPool", "Dauntiblyat",
+            "Gumballoff", "TopkaAutoBuy", "XorekAutoBuy", "Zenith", "Horizen", "Toffi", "LiquidLauncher",
+            // Сигнатуры шеллкод-лоадера из Python (IPT1 / C2 IP / payload)
+            "138.16.176.212", "78.40.193.175", "IPT1", "696d706f727420637479706573"
+        };
+
+        // Сигнатуры клинеров, спуферов и утилит сокрытия
+        static readonly string[] CleanerSignatures = new string[]
+        {
+            "SS_Cleaner", "TraceCleaner", "USNJournalCleaner", "PrefetchCleaner", "BAMCleaner",
+            "RegCleaner", "AveyCleaner", "OceanCleaner", "EchoCleaner", "ViperCleaner", "AeroCleaner",
+            "Chameleon", "ModFaker", "VersionFaker", "JarSpoofer", "USBOblivion", "Privazer",
+            "BleachBit", "R-Wipe", "WinPrefetchView", "ShellbagAnalyzer", "shellbag_analyzer",
+            "JournalTrace", "ExecutedProgramsList", "LastActivityView", "SystemInformer", "ProcessHacker"
+        };
+
+        // Частицы кода читов, инжекторов и клинеров для глубокого поиска по файлам
+        static readonly string[] CodeFragmentSignatures = new string[]
+        {
+            "VirtualAllocEx", "WriteProcessMemory", "CreateRemoteThread", "NtCreateThreadEx",
+            "ctypes.windll.kernel32", "bytes.fromhex", "amsiInitFailed", "EtwEventWrite",
+            "PSEtwLogProvider", "usn deletejournal", "JNI_OnLoad", "jvmtiEnv", "RetransformClasses",
+            "RedefineClasses", "DefineClass", "net/java/faker", "net/java/s.class", "net/java/f.class",
+            "dontPlaceCrystal", "canPlaceCrystalServer", "AutoDoubleHand", "preventSwordBlockBreaking",
+            "attackRegisteredThisClick", "swapBackToOriginalSlot", "autoCrystalPlaceClock",
+            "invokeDoAttack", "obfuscatedAuth", "LicenseCheckMixin", "dev.gambleclient", "dev.krypton"
+        };
+
+        static readonly string[] WhitelistMods = new string[]
+        {
+            "optifine", "sodium", "fabric-api", "forge", "iris", "lithium", "jei", "rei", "voicechat", "modmenu", "ferritecore"
+        };
+
+        static readonly byte[][] CheatBytesLower;
+        static readonly byte[][] CleanerBytesLower;
+        static readonly byte[][] FragmentBytesLower;
+
+        static Scanner()
+        {
+            CheatBytesLower = CheatSignatures.Select(s => Encoding.ASCII.GetBytes(s.ToLowerInvariant())).ToArray();
+            CleanerBytesLower = CleanerSignatures.Select(c => Encoding.ASCII.GetBytes(c.ToLowerInvariant())).ToArray();
+            FragmentBytesLower = CodeFragmentSignatures.Select(f => Encoding.ASCII.GetBytes(f.ToLowerInvariant())).ToArray();
+        }
+
+        public static bool IsSigned(string path)
+        {
+            try
+            {
+                if (!File.Exists(path)) return false;
+                return X509Certificate.CreateFromSignedFile(path) != null;
+            }
+            catch { return false; }
+        }
+
+        static bool ContainsPattern(byte[] buffer, int length, byte[] patternLower)
+        {
+            int pLen = patternLower.Length;
+            if (pLen == 0 || length < pLen) return false;
+            int limit = length - pLen;
+            byte first = patternLower[0];
+            byte firstUpper = (first >= 97 && first <= 122) ? (byte)(first - 32) : first;
+
+            for (int i = 0; i <= limit; i++)
+            {
+                byte b = buffer[i];
+                if (b != first && b != firstUpper) continue;
+
+                bool match = true;
+                for (int j = 1; j < pLen; j++)
+                {
+                    byte cb = buffer[i + j];
+                    if (cb >= 65 && cb <= 90) cb += 32;
+                    if (cb != patternLower[j])
+                    {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) return true;
+            }
+            return false;
+        }
+
+        public static List<AuditRecord> ScanProcessMemory(int pid, string procName)
+        {
+            var hits = new List<AuditRecord>();
+            IntPtr h = OpenProcess(0x0010 | 0x0400, false, pid);
+            if (h == IntPtr.Zero) return hits;
+
+            long addr = 0;
+            MBI mbi;
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var sb = new StringBuilder(512);
+            byte[] sharedBuf = new byte[4 * 1024 * 1024];
+
+            try
+            {
+                while (VirtualQueryEx(h, (IntPtr)addr, out mbi, (uint)Marshal.SizeOf(typeof(MBI))) != 0)
+                {
+                    long size = (long)mbi.RegionSize;
+                    uint prot = mbi.Protect & 0xFF;
+
+                    if (mbi.State == 0x1000 && (prot == 0x10 || prot == 0x20 || prot == 0x40 || prot == 0x80))
+                    {
+                        bool unbacked = (mbi.Type == 0x20000 && size >= 4096 && GetMappedFileName(h, mbi.BaseAddress, sb, 512) == 0);
+                        int readSize = (int)Math.Min(size, sharedBuf.Length);
+
+                        IntPtr read;
+                        if (ReadProcessMemory(h, mbi.BaseAddress, sharedBuf, readSize, out read) && (int)read > 0)
+                        {
+                            int len = (int)read;
+
+                            if (unbacked && len >= 2 && sharedBuf[0] == 0x4D && sharedBuf[1] == 0x5A)
+                            {
+                                string key = "PE_" + mbi.BaseAddress;
+                                if (seen.Add(key))
+                                {
+                                    hits.Add(new AuditRecord
+                                    {
+                                        Severity = "RED",
+                                        Sector = "Память и инъекции",
+                                        Title = "Скрытый Manual-Map инжект (PE/DLL без файла на диске)",
+                                        Target = string.Format("{0}.exe (PID: {1}) @ 0x{2:X}", procName, pid, (long)mbi.BaseAddress),
+                                        Evidence = string.Format("Обнаружен исполняемый заголовок MZ в приватной памяти ({0} КБ)", size / 1024)
+                                    });
+                                }
+                            }
+
+                            for (int i = 0; i < CheatBytesLower.Length; i++)
+                            {
+                                if (!seen.Contains(CheatSignatures[i]) && ContainsPattern(sharedBuf, len, CheatBytesLower[i]))
+                                {
+                                    seen.Add(CheatSignatures[i]);
+                                    hits.Add(new AuditRecord
+                                    {
+                                        Severity = "RED",
+                                        Sector = "Память и инъекции",
+                                        Title = "Сигнатура чита / лоадера в исполняемой памяти",
+                                        Target = string.Format("{0}.exe (PID: {1}) @ 0x{2:X}", procName, pid, (long)mbi.BaseAddress),
+                                        Evidence = "Совпадение: " + CheatSignatures[i]
+                                    });
+                                }
+                            }
+
+                            for (int i = 0; i < CleanerBytesLower.Length; i++)
+                            {
+                                if (!seen.Contains(CleanerSignatures[i]) && ContainsPattern(sharedBuf, len, CleanerBytesLower[i]))
+                                {
+                                    seen.Add(CleanerSignatures[i]);
+                                    hits.Add(new AuditRecord
+                                    {
+                                        Severity = "RED",
+                                        Sector = "Память и инъекции",
+                                        Title = "След утилиты сокрытия / спуфера в памяти",
+                                        Target = string.Format("{0}.exe (PID: {1})", procName, pid),
+                                        Evidence = "Инструмент: " + CleanerSignatures[i]
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    long next = (long)mbi.BaseAddress + size;
+                    if (next <= addr || next > 0x7FFFFFFFFFFF) break;
+                    addr = next;
+                }
+            }
+            finally { CloseHandle(h); }
+            return hits;
+        }
+
+        public static List<AuditRecord> ScanFilesParallel(string[] files, Action<int, int> onProgress)
+        {
+            var results = new ConcurrentBag<AuditRecord>();
+            int total = files.Length;
+            int done = 0;
+
+            Parallel.ForEach(files, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, path =>
+            {
+                int cur = Interlocked.Increment(ref done);
+                if (onProgress != null && (cur % 5 == 0 || cur == total))
+                {
+                    onProgress(cur, total);
+                }
+
+                try
+                {
+                    string ext = Path.GetExtension(path).ToLowerInvariant();
+                    if (ext == ".jar")
+                    {
+                        InspectJar(path, results);
+                    }
+                    else
+                    {
+                        InspectGenericFile(path, ext, results);
+                    }
+                }
+                catch { }
+            });
+
+            return results.ToList();
+        }
+
+        static void InspectJar(string path, ConcurrentBag<AuditRecord> results)
+        {
+            string fName = Path.GetFileName(path).ToLowerInvariant();
+            foreach (var w in WhitelistMods)
+            {
+                if (fName.Contains(w)) return;
+            }
+
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                byte[] hdr = new byte[2];
+                if (fs.Read(hdr, 0, 2) < 2 || hdr[0] != 0x50 || hdr[1] != 0x4B) return;
+                fs.Position = 0;
+
+                using (var zip = new ZipArchive(fs, ZipArchiveMode.Read))
+                {
+                    var redTraits = new HashSet<string>();
+                    var yellowTraits = new HashSet<string>();
+                    int customClasses = 0;
+                    int obfClasses = 0;
+                    int nestedJars = 0;
+
+                    foreach (var ent in zip.Entries)
+                    {
+                        string eLow = ent.FullName.ToLowerInvariant();
+                        if (eLow.StartsWith("meta-inf/jars/") && eLow.EndsWith(".jar"))
+                        {
+                            nestedJars++;
+                        }
+
+                        if (!eLow.EndsWith(".class")) continue;
+                        if (eLow.StartsWith("org/lwjgl/") || eLow.StartsWith("io/netty/") || eLow.StartsWith("org/apache/") || eLow.StartsWith("com/mojang/")) continue;
+
+                        customClasses++;
+                        string clsName = Path.GetFileNameWithoutExtension(ent.FullName);
+                        if (clsName.Length <= 2) obfClasses++;
+
+                        using (var ms = new MemoryStream())
+                        {
+                            ent.Open().CopyTo(ms);
+                            byte[] raw = ms.ToArray();
+                            string code = Encoding.ASCII.GetString(raw);
+
+                            foreach (var s in CheatSignatures)
+                            {
+                                if (code.IndexOf(s, StringComparison.OrdinalIgnoreCase) >= 0)
+                                    redTraits.Add("Сигнатура чита: " + s);
+                            }
+
+                            foreach (var frag in CodeFragmentSignatures)
+                            {
+                                if (code.IndexOf(frag, StringComparison.OrdinalIgnoreCase) >= 0)
+                                    redTraits.Add("Код чита: " + frag);
+                            }
+
+                            if (code.Contains("spongepowered/asm/mixin") || code.Contains("java/lang/reflect"))
+                            {
+                                bool aabb = code.Contains("AxisAlignedBB") || code.Contains("getBoundingBox") || code.Contains("class_238");
+                                bool expand = code.Contains("expand(") || code.Contains("grow(") || code.Contains("ModifyConstant") || code.Contains("inflate");
+                                bool entPlayer = code.Contains("EntityPlayer") || code.Contains("PlayerEntity") || code.Contains("class_1657");
+
+                                if (aabb && expand && entPlayer)
+                                    redTraits.Add("Hitbox Expander (расширение AxisAlignedBB)");
+
+                                if ((code.Contains("getBlockReachDistance") || code.Contains("func_78757_d")) && code.Contains("ModifyReturnValue"))
+                                    redTraits.Add("Reach (подмена дистанции удара)");
+
+                                if ((code.Contains("C02PacketUseEntity") || code.Contains("class_2824")) && (code.Contains("onTick") || code.Contains("ClientTickEvents")))
+                                    redTraits.Add("KillAura / TriggerBot (пакеты атаки в тике)");
+
+                                if (code.Contains("java/awt/Robot") && code.Contains("mousePress"))
+                                    redTraits.Add("AutoClicker (java.awt.Robot)");
+                            }
+                        }
+                    }
+
+                    if (nestedJars == 1 && customClasses < 3)
+                    {
+                        yellowTraits.Add("Полая оболочка мода (оборачивает вложенный JAR)");
+                    }
+                    if (customClasses > 20 && (double)obfClasses / customClasses > 0.70)
+                    {
+                        yellowTraits.Add(string.Format("Сильная обфускация байт-кода ({0}/{1} классов)", obfClasses, customClasses));
+                    }
+
+                    if (redTraits.Count > 0)
+                    {
+                        results.Add(new AuditRecord
+                        {
+                            Severity = "RED",
+                            Sector = "Анализ модов и файлов",
+                            Title = "Обнаружен чит-код внутри JAR-модификации",
+                            Target = path,
+                            Evidence = string.Join(" | ", redTraits.Take(5))
+                        });
+                    }
+                    else if (yellowTraits.Count > 0)
+                    {
+                        results.Add(new AuditRecord
+                        {
+                            Severity = "YELLOW",
+                            Sector = "Анализ модов и файлов",
+                            Title = "Подозрительная структура / обфускация JAR-файла (50/50)",
+                            Target = path,
+                            Evidence = string.Join(" | ", yellowTraits)
+                        });
+                    }
+                }
+            }
+        }
+
+        static void InspectGenericFile(string path, string ext, ConcurrentBag<AuditRecord> results)
+        {
+            var fi = new FileInfo(path);
+            if (fi.Length == 0 || fi.Length > 40 * 1024 * 1024) return;
+
+            bool isBinary = (ext == ".exe" || ext == ".dll" || ext == ".pyd");
+            if (isBinary && IsSigned(path)) return;
+
+            byte[] data = File.ReadAllBytes(path);
+            var redMatches = new HashSet<string>();
+            var yellowMatches = new HashSet<string>();
+
+            for (int i = 0; i < CheatBytesLower.Length; i++)
+            {
+                if (ContainsPattern(data, data.Length, CheatBytesLower[i]))
+                    redMatches.Add("Чит: " + CheatSignatures[i]);
+            }
+
+            for (int i = 0; i < CleanerBytesLower.Length; i++)
+            {
+                if (ContainsPattern(data, data.Length, CleanerBytesLower[i]))
+                    redMatches.Add("Клинер/Спуфер: " + CleanerSignatures[i]);
+            }
+
+            for (int i = 0; i < FragmentBytesLower.Length; i++)
+            {
+                if (ContainsPattern(data, data.Length, FragmentBytesLower[i]))
+                    yellowMatches.Add("Фрагмент кода: " + CodeFragmentSignatures[i]);
+            }
+
+            if (redMatches.Count > 0)
+            {
+                results.Add(new AuditRecord
+                {
+                    Severity = "RED",
+                    Sector = "Анализ модов и файлов",
+                    Title = "Обнаружены сигнатуры чита / лоадера / клинера в файле",
+                    Target = path,
+                    Evidence = string.Join(" | ", redMatches.Take(6))
+                });
+            }
+            else if (yellowMatches.Count >= 2)
+            {
+                results.Add(new AuditRecord
+                {
+                    Severity = "RED",
+                    Sector = "Анализ модов и файлов",
+                    Title = "Обнаружен код инжектора / шеллкод-лоадера в файле",
+                    Target = path,
+                    Evidence = string.Join(" | ", yellowMatches.Take(6))
+                });
+            }
+            else if (yellowMatches.Count == 1)
+            {
+                results.Add(new AuditRecord
+                {
+                    Severity = "YELLOW",
+                    Sector = "Анализ модов и файлов",
+                    Title = "Подозрительный системный вызов в неподписанном файле (50/50)",
+                    Target = path,
+                    Evidence = string.Join(" | ", yellowMatches)
+                });
+            }
+        }
+    }
+}
+"@
+
+try {
+    Add-Type -TypeDefinition $EngineCode -Language CSharp -ReferencedAssemblies @("System.IO.Compression", "System.IO.Compression.FileSystem", "System.Core")
+} catch {
+    Write-Host "`n[FATAL] Ошибка инициализации движка сканирования: $($_.Exception.Message)" -ForegroundColor Red
+    Read-Host "Нажмите Enter для выхода..."
+    exit
+}
+
+# --- СБОР ДАННЫХ О ЖЕЛЕЗЕ (CPU, GPU, RAM, DISK) ---
+$CpuInfo = Get-CimInstance Win32_Processor | Select-Object -First 1
+$GpuInfo = (Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name) -join ", "
+$CpuCores = [Environment]::ProcessorCount
+$TotalRam = [Math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)
+$DiskType = "SSD"
+try {
+    $pd = Get-PhysicalDisk | Select-Object -First 1
+    if ($pd.MediaType) { $DiskType = $pd.MediaType }
+} catch {}
+
+$JavawProcs = Get-Process "javaw", "java" -ErrorAction SilentlyContinue
+$JavawMem = 0
+foreach ($p in $JavawProcs) { $JavawMem += ($p.WorkingSet64 / 1MB) }
+
+# --- СБОР ФАЙЛОВ ПО ВСЕМ ДИСКАМ И ПАПКАМ ПОЛЬЗОВАТЕЛЯ ---
+$FilesToScan = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+$TargetRoots = @(
+    (Join-Path $env:APPDATA ".minecraft"),
+    $env:TEMP,
+    (Join-Path $env:USERPROFILE "Downloads"),
+    (Join-Path $env:USERPROFILE "Desktop"),
+    (Join-Path $env:USERPROFILE "Documents"),
+    "C:\ProgramData",
+    "C:\Users\Public"
+)
+$TargetExts = @(".jar", ".py", ".pyw", ".ps1", ".bat", ".cmd", ".vbs", ".js", ".exe", ".dll", ".pyd")
+
+foreach ($root in $TargetRoots) {
+    if (Test-Path $root) {
+        Get-ChildItem -Path $root -Depth 3 -File -ErrorAction SilentlyContinue | Where-Object {
+            $TargetExts -contains $_.Extension.ToLowerInvariant()
+        } | ForEach-Object {
+            [void]$FilesToScan.Add($_.FullName)
+        }
+    }
+}
+
+$FileArray = $FilesToScan.ToArray()
+
+# --- КАЛИБРОВКА ТАЙМЕРА ПОД ЖЕЛЕЗО ---
+$DiskFactor = if ($DiskType -match "HDD") { 2.2 } else { 1.0 }
+$CoreFactor = [Math]::Max(0.5, 8.0 / [Math]::Max(2, $CpuCores))
+$GpuFactor  = if ($GpuInfo -match "Microsoft Basic|VMware|VirtualBox") { 1.3 } else { 1.0 }
+$EstimatedTotalSec = [Math]::Max(3.0, ((($JavawMem / 2500.0) * $CoreFactor) + ($FileArray.Count * 0.018 * $DiskFactor * $CoreFactor) + 2.0) * $GpuFactor)
+
+$GlobalTimer = [System.Diagnostics.Stopwatch]::StartNew()
+$Records = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+function Add-Record {
+    param([string]$Severity, [string]$Sector, [string]$Title, [string]$Target, [string]$Evidence)
+    $Records.Add([PSCustomObject]@{
+        Severity = $Severity
+        Sector   = $Sector
+        Title    = $Title
+        Target   = $Target
+        Evidence = $Evidence
+    })
+}
+
+function Render-TimerScreen {
+    param([int]$Percent)
+    if ($Percent -gt 100) { $Percent = 100 }
+    if ($Percent -lt 0) { $Percent = 0 }
+
+    $elapsed = $GlobalTimer.Elapsed.TotalSeconds
+    $remSec = if ($Percent -ge 10) {
+        ($elapsed / ($Percent / 100.0)) - $elapsed
+    } else {
+        $EstimatedTotalSec - $elapsed
+    }
+    if ($remSec -lt 0) { $remSec = 0 }
+
+    $ts = [TimeSpan]::FromSeconds([Math]::Ceiling($remSec))
+    $etaStr = if ($ts.TotalMinutes -ge 1) {
+        "{0} мин {1:D2} сек" -f [int][Math]::Floor($ts.TotalMinutes), $ts.Seconds
+    } else {
+        "{0} сек" -f $ts.Seconds
+    }
+
+    $barWidth = 42
+    $filled = [Math]::Floor(($Percent / 100.0) * $barWidth)
+    $bar = ("█" * $filled) + ("░" * ($barWidth - $filled))
+
+    [Console]::SetCursorPosition(0, 0)
+    Write-Host "╔════════════════════════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+    Write-Host "║                          AVGAR ANTICHEAT | FULL AUDIT                          ║" -ForegroundColor White
+    Write-Host "╠════════════════════════════════════════════════════════════════════════════════╣" -ForegroundColor Cyan
+    Write-Host ("║  CPU: {0} ({1} потоков) | RAM: {2} ГБ | Диск: {3}" -f $CpuInfo.Name.Trim(), $CpuCores, $TotalRam, $DiskType).PadRight(81) + "║" -ForegroundColor DarkGray
+    Write-Host ("║  GPU: {0}" -f $GpuInfo).PadRight(81) + "║" -ForegroundColor DarkGray
+    Write-Host "╠════════════════════════════════════════════════════════════════════════════════╣" -ForegroundColor Cyan
+    Write-Host ("║  Прогресс: [{0}] {1,3}%                                ║" -f $bar, $Percent) -ForegroundColor Green
+    Write-Host ("║  Осталось до завершения: {0,-22}                                ║" -f $etaStr) -ForegroundColor White
+    Write-Host "╚════════════════════════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+}
+
+Clear-Host
+Render-TimerScreen -Percent 5
+
+# Записываем информацию о железе в зеленый сектор
+Add-Record -Severity "GREEN" -Sector "Система и сессии Minecraft" -Title "Конфигурация оборудования ПК" -Target "$env:COMPUTERNAME" -Evidence "CPU: $($CpuInfo.Name.Trim()) ($CpuCores ядер) | GPU: $GpuInfo | RAM: $TotalRam ГБ | Диск: $DiskType"
+
+# --- 1. СКАНИРОВАНИЕ ПАМЯТИ ПРОЦЕССОВ (JAVAW, PYTHON, EXPLORER) ---
+$ProcsToAudit = Get-Process -Name "javaw", "java", "python", "pythonw" -ErrorAction SilentlyContinue
+$pIdx = 0
+$pTotal = ($ProcsToAudit | Measure-Object).Count
+
+foreach ($pr in $ProcsToAudit) {
+    $pIdx++
+    $pct = 5 + [int](($pIdx / [Math]::Max(1, $pTotal)) * 20)
+    Render-TimerScreen -Percent $pct
+
+    $memHits = [AvgarCore.Scanner]::ScanProcessMemory($pr.Id, $pr.ProcessName)
+    foreach ($mh in $memHits) {
+        Add-Record -Severity $mh.Severity -Sector $mh.Sector -Title $mh.Title -Target $mh.Target -Evidence $mh.Evidence
+    }
+
+    if ($pr.ProcessName -match '^python') {
+        Add-Record -Severity "YELLOW" -Sector "Память и инъекции" -Title "Активный процесс интерпретатора Python (50/50)" -Target "$($pr.ProcessName).exe (PID: $($pr.Id))" -Evidence "Запущен в $($pr.StartTime.ToString('dd.MM.yyyy HH:mm:ss'))"
+    } else {
+        Add-Record -Severity "GREEN" -Sector "Система и сессии Minecraft" -Title "Активная сессия Minecraft" -Target "$($pr.ProcessName).exe (PID: $($pr.Id))" -Evidence "Старт: $($pr.StartTime.ToString('dd.MM.yyyy HH:mm:ss')) | ОЗУ: $([Math]::Round($pr.WorkingSet64 / 1MB)) МБ"
+    }
+}
+
+# --- 2. МНОГОПОТОЧНЫЙ ПОИСК ЧАСТИЦ КОДА ПО ФАЙЛАМ ---
+Render-TimerScreen -Percent 25
+if ($FileArray.Count -gt 0) {
+    $cb = {
+        param($cur, $tot)
+        $p = 25 + [int](($cur / [Math]::Max(1, $tot)) * 40)
+        Render-TimerScreen -Percent $p
+    }
+    $fileHits = [AvgarCore.Scanner]::ScanFilesParallel($FileArray, $cb)
+    foreach ($fh in $fileHits) {
+        Add-Record -Severity $fh.Severity -Sector $fh.Sector -Title $fh.Title -Target $fh.Target -Evidence $fh.Evidence
+    }
+}
+
+# --- 3. ИСТОРИЯ PYTHON IDLE, POWERSHELL И CMD (ВЫВОД САМИХ КОМАНД) ---
+Render-TimerScreen -Percent 70
+$CmdDangerRx = '(bytes\.fromhex|VirtualAlloc|WriteProcessMemory|CreateRemoteThread|ctypes|windll|138\.16\.176\.212|78\.40\.193\.175|IPT1|9543|Invoke-Expression|\biex\b|DownloadString|DownloadData|FromBase64String|amsiInitFailed|Set-MpPreference|wevtutil|usn\s+deletejournal|taskkill\s+/f|SystemDLC|MHub|Cortex|EverDLC|SS_Cleaner|AveyCleaner)'
+
+# 3.1 Python IDLE (.idlerc)
+$IdleDir = Join-Path $env:USERPROFILE ".idlerc"
+if (Test-Path $IdleDir) {
+    $histFile = Join-Path $IdleDir "history.lst"
+    if (Test-Path $histFile) {
+        $idleLines = Get-Content $histFile -ErrorAction SilentlyContinue | Select-Object -Last 60
+        $allIdleText = ($idleLines -join " | ")
+        foreach ($line in $idleLines) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            if ($line -match $CmdDangerRx) {
+                Add-Record -Severity "RED" -Sector "История терминалов (Python IDLE / PS / CMD)" -Title "Обнаружен код инжектора / лоадера в истории Python IDLE" -Target "Python IDLE (history.lst)" -Evidence "Введенный код: $line"
+            }
+        }
+        if ($idleLines.Count -gt 0) {
+            $preview = if ($allIdleText.Length -gt 240) { $allIdleText.Substring($allIdleText.Length - 240) } else { $allIdleText }
+            Add-Record -Severity "GREEN" -Sector "История терминалов (Python IDLE / PS / CMD)" -Title "Последние команды в Python IDLE ($($idleLines.Count) строк)" -Target "Python IDLE" -Evidence $preview
+        }
+    }
+
+    $recentIdle = Join-Path $IdleDir "recent-files.lst"
+    if (Test-Path $recentIdle) {
+        $rFiles = Get-Content $recentIdle -ErrorAction SilentlyContinue
+        foreach ($rf in $rFiles) {
+            if ($rf -match '(SystemDLC|MHub|Cortex|loader|inject|cheat|bypass|\.py)') {
+                $sev = if ($rf -match '(SystemDLC|MHub|Cortex|inject|bypass)') { "RED" } else { "YELLOW" }
+                Add-Record -Severity $sev -Sector "История терминалов (Python IDLE / PS / CMD)" -Title "Файл, открывавшийся в Python IDLE" -Target "recent-files.lst" -Evidence "Путь: $rf"
+            }
+        }
+    }
+}
+
+# 3.2 PowerShell (ConsoleHost_history.txt + Event ID 4104 даже если файл истории удален)
+$PsHistPath = Join-Path $env:APPDATA "Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt"
+if (Test-Path $PsHistPath) {
+    $psLines = Get-Content $PsHistPath -ErrorAction SilentlyContinue | Select-Object -Last 80
+    foreach ($pl in $psLines) {
+        if ([string]::IsNullOrWhiteSpace($pl)) { continue }
+        if ($pl -match $CmdDangerRx -and $pl -notmatch 'AvgarAntiCheat') {
+            Add-Record -Severity "RED" -Sector "История терминалов (Python IDLE / PS / CMD)" -Title "Подозрительная команда в истории PowerShell" -Target "ConsoleHost_history.txt" -Evidence "Команда: $pl"
+        }
+    }
+    if ($psLines.Count -gt 0) {
+        $lastPs = ($psLines | Select-Object -Last 10) -join " ; "
+        Add-Record -Severity "GREEN" -Sector "История терминалов (Python IDLE / PS / CMD)" -Title "Последние 10 команд PowerShell" -Target "ConsoleHost_history.txt" -Evidence $lastPs
+    }
+} else {
+    Add-Record -Severity "YELLOW" -Sector "История терминалов (Python IDLE / PS / CMD)" -Title "Файл истории PowerShell отсутствует или был удален (50/50)" -Target "PSReadLine" -Evidence "ConsoleHost_history.txt не найден"
+}
+
+# Восстановление удаленной истории PowerShell из журнала Event ID 4104
+$Ev4104 = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-PowerShell/Operational'; Id = 4104 } -MaxEvents 150 -ErrorAction SilentlyContinue
+foreach ($ev in $Ev4104) {
+    if ($ev.ProcessId -eq $PID) { continue }
+    $msg = $ev.Message
+    if ($msg -match 'AvgarCore|AvgarAntiCheat') { continue }
+    if ($msg -match $CmdDangerRx) {
+        $snippet = ($msg -replace '\s+', ' ').Trim()
+        if ($snippet.Length -gt 220) { $snippet = $snippet.Substring(0, 220) + "..." }
+        Add-Record -Severity "RED" -Sector "История терминалов (Python IDLE / PS / CMD)" -Title "Восстановленный блок скрипта из журнала PowerShell (Event 4104)" -Target "Время: $($ev.TimeCreated.ToString('dd.MM.yyyy HH:mm:ss'))" -Evidence "Код: $snippet"
+    }
+}
+
+# 3.3 CMD и запуски процессов (Event ID 4688 + RunMRU)
+$Ev4688 = Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 4688 } -MaxEvents 300 -ErrorAction SilentlyContinue
+foreach ($ev in $Ev4688) {
+    if ($ev.Message -match '(cmd\.exe|pythonw?\.exe|powershell\.exe)') {
+        if ($ev.Message -match $CmdDangerRx -and $ev.Message -notmatch 'AvgarAntiCheat') {
+            $cmdLine = ""
+            if ($ev.Message -match '(?:Command Line|Командная строка процесса):\s*(.+)') { $cmdLine = $Matches[1].Trim() }
+            if ($cmdLine) {
+                Add-Record -Severity "RED" -Sector "История терминалов (Python IDLE / PS / CMD)" -Title "Зафиксирована опасная команда CMD / Python (Event 4688)" -Target "Время: $($ev.TimeCreated.ToString('dd.MM.yyyy HH:mm:ss'))" -Evidence "Команда: $cmdLine"
+            }
+        }
+    }
+}
+
+# --- 4. ФОРЕНЗИКА ОС, СЕТЬ, РЕЕСТР И СЛУЖБЫ ---
+Render-TimerScreen -Percent 85
+
+$FullCheatRx = '(SystemDLC|Cortex|MHub|EverDLC|Nursultan|Celestial|Expensive|Wexside|Rich|Akrien|Vape|Doomsday|ExLoader|LunarPatcher|WildClient|Mytheria|Wexium|DeltaClient|Catlavan|SS_Cleaner|TraceCleaner|AveyCleaner|OceanCleaner|EchoCleaner|ViperCleaner|Chameleon|ModFaker|USBOblivion|shellbag_analyzer|JournalTrace|WinPrefetchView|SystemInformer)'
+
+# 4.1 DNS-кэш (включая IP из Python-инжектора)
+$DnsRaw = ipconfig /displaydns 2>&1 | Out-String
+foreach ($netSig in @("systemdlc", "mhub", "cortex", "everdlc", "vape.gg", "manthe.net", "slinky.gg", "138.16.176.212", "78.40.193.175")) {
+    if ($DnsRaw -match [regex]::Escape($netSig)) {
+        Add-Record -Severity "RED" -Sector "Форензика ОС и сеть" -Title "Сетевой след обращения к серверу чита / лоадера" -Target "DNS Cache" -Evidence "Обнаружен узел: $netSig"
+    }
+}
+
+# 4.2 USN Journal и недавно удаленные файлы (48 часов)
+$UsnQuery = fsutil usn queryjournal C: 2>&1 | Out-String
+if ($UsnQuery -notmatch "Usn Journal ID") {
+    Add-Record -Severity "RED" -Sector "Форензика ОС и сеть" -Title "Журнал файловой системы USN Journal отключен или уничтожен" -Target "Диск C:" -Evidence "Признак работы SS-клинера"
+} else {
+    Add-Record -Severity "GREEN" -Sector "Форензика ОС и сеть" -Title "Статус журнала NTFS USN Journal" -Target "Диск C:" -Evidence "Активен и ведет запись"
+    if ($UsnQuery -match 'First Usn\s*:\s*(0x[0-9a-fA-F]+)') {
+        $fUsn = [Convert]::ToInt64($Matches[1].Substring(2), 16)
+        $delLogs = cmd /c "fsutil usn readjournal C: startusn=$fUsn csv | findstr /i /c:""0x80000200"" /c:""File Delete""" 2>$null | Select-Object -Last 200
+        foreach ($dl in $delLogs) {
+            if ($dl -match $FullCheatRx) {
+                $parts = $dl -split '","'
+                $fn = if ($parts.Count -ge 2) { $parts[1].Trim('"') } else { $dl }
+                Add-Record -Severity "RED" -Sector "Форензика ОС и сеть" -Title "Удаленный чит / клинер восстановлен из USN Journal" -Target "NTFS USN" -Evidence "Файл: $fn"
+            }
+        }
+    }
+}
+
+# 4.3 BAM Registry
+$BamKey = "HKLM:\SYSTEM\CurrentControlSet\Services\bam\State\UserSettings"
+if (Test-Path $BamKey) {
+    Get-ChildItem $BamKey -ErrorAction SilentlyContinue | ForEach-Object {
+        $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+        foreach ($p in $props.PSObject.Properties) {
+            if ($p.Name -match $FullCheatRx) {
+                $tStr = "Неизвестно"
+                if ($p.Value -is [byte[]] -and $p.Value.Length -ge 8) {
+                    $ft = [BitConverter]::ToInt64($p.Value, 0)
+                    if ($ft -gt 0) { $tStr = [DateTime]::FromFileTime($ft).ToString("dd.MM.yyyy HH:mm:ss") }
+                }
+                Add-Record -Severity "RED" -Sector "Форензика ОС и сеть" -Title "Запуск запрещенного ПО зафиксирован в реестре BAM" -Target $p.Name -Evidence "Время запуска: $tStr"
+            }
+        }
+    }
+}
+
+# 4.4 Prefetch
+if (Test-Path "C:\Windows\Prefetch") {
+    $pfFiles = Get-ChildItem "C:\Windows\Prefetch" -Filter "*.pf" -ErrorAction SilentlyContinue
+    if ($pfFiles.Count -lt 15) {
+        Add-Record -Severity "RED" -Sector "Форензика ОС и сеть" -Title "Папка Prefetch была очищена перед проверкой" -Target "C:\Windows\Prefetch" -Evidence "Осталось файлов: $($pfFiles.Count)"
+    }
+    $pfFiles | Where-Object { $_.Name -match $FullCheatRx } | ForEach-Object {
+        Add-Record -Severity "RED" -Sector "Форензика ОС и сеть" -Title "След запуска чита / клинера в Prefetch" -Target $_.FullName -Evidence "Последний запуск: $($_.LastWriteTime.ToString('dd.MM.yyyy HH:mm:ss'))"
+    }
+}
+
+# 4.5 Корзина (Recycle Bin)
+$Shell = New-Object -ComObject Shell.Application
+$Bin = $Shell.Namespace(10)
+$binCount = 0
+foreach ($item in $Bin.Items()) {
+    $binCount++
+    if ($item.Name -match $FullCheatRx) {
+        Add-Record -Severity "RED" -Sector "Форензика ОС и сеть" -Title "Удаленный чит / лоадер обнаружен в Корзине" -Target $item.Name -Evidence "Находится в корзине пользователя"
+    }
+}
+Add-Record -Severity "GREEN" -Sector "Форензика ОС и сеть" -Title "Состояние Корзины Windows" -Target "Recycle Bin" -Evidence "Элементов в корзине: $binCount"
+
+# 4.6 USB накопители
+$UsbDevs = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Enum\USBSTOR\*\*" -ErrorAction SilentlyContinue
+foreach ($u in $UsbDevs) {
+    if ($u.FriendlyName) {
+        Add-Record -Severity "YELLOW" -Sector "Форензика ОС и сеть" -Title "История подключения USB-накопителя (50/50)" -Target "USBSTOR" -Evidence "Устройство: $($u.FriendlyName)"
+    }
+}
+
+# 4.7 Службы
+foreach ($svc in @("SysMain", "DPS", "EventLog", "DiagTrack")) {
+    $sObj = Get-CimInstance Win32_Service -Filter "Name = '$svc'" -ErrorAction SilentlyContinue
+    if ($sObj) {
+        if ($sObj.State -ne "Running") {
+            Add-Record -Severity "RED" -Sector "Форензика ОС и сеть" -Title "Критическая служба логирования остановлена" -Target "Служба $svc" -Evidence "Статус: $($sObj.State)"
+        } else {
+            Add-Record -Severity "GREEN" -Sector "Форензика ОС и сеть" -Title "Служба $svc работает штатно" -Target "Service" -Evidence "Статус: Running"
+        }
+    }
+}
+
+Render-TimerScreen -Percent 100
+$GlobalTimer.Stop()
+Start-Sleep -Milliseconds 350
+
+# --- СОХРАНЕНИЕ ПОЛНОГО ОТЧЕТА В ФАЙЛ ---
+$OutFile = Join-Path $OutputDir "Avgar_Audit_$(Get-Date -Format 'yyyy-MM-dd_HH-mm').txt"
+$LogBuilder = [System.Text.StringBuilder]::new()
+[void]$LogBuilder.AppendLine("AVGAR ANTICHEAT | FULL AUDIT REPORT ($(Get-Date -Format 'dd.MM.yyyy HH:mm:ss'))")
+[void]$LogBuilder.AppendLine("==========================================================================================")
+foreach ($rec in $Records) {
+    [void]$LogBuilder.AppendLine("[$($rec.Severity)] [$($rec.Sector)] $($rec.Title) | $($rec.Target) | $($rec.Evidence)")
+}
+$LogBuilder.ToString() | Out-File -FilePath $OutFile -Encoding UTF8
+
+# --- ИНТЕРАКТИВНОЕ ОКНО ПРОСМОТРА СЕКТОРОВ ---
+$Sectors = @(
+    "Память и инъекции",
+    "Анализ модов и файлов",
+    "История терминалов (Python IDLE / PS / CMD)",
+    "Форензика ОС и сеть",
+    "Система и сессии Minecraft"
+)
+
+function Show-SectorView {
+    param([string]$SelectedSector)
+    Clear-Host
+    $rCount = ($Records | Where-Object { $_.Severity -eq "RED" }).Count
+    $yCount = ($Records | Where-Object { $_.Severity -eq "YELLOW" }).Count
+    $gCount = ($Records | Where-Object { $_.Severity -eq "GREEN" }).Count
+
+    Write-Host "╔════════════════════════════════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+    Write-Host ("║  AVGAR ANTICHEAT | РЕЗУЛЬТАТЫ ПРОВЕРКИ ({0} сек)                                      ║" -f [Math]::Round($GlobalTimer.Elapsed.TotalSeconds, 1)) -ForegroundColor White
+    Write-Host ("║  КРАСНЫЕ (Точный чит): {0,-4} | ЖЕЛТЫЕ (50/50): {1,-4} | ЗЕЛЕНЫЕ (Система): {2,-4}            ║" -f $rCount, $yCount, $gCount) -ForegroundColor White
+    Write-Host "╠════════════════════════════════════════════════════════════════════════════════════════╣" -ForegroundColor Cyan
+    for ($i = 0; $i -lt $Sectors.Count; $i++) {
+        $secName = $Sectors[$i]
+        $secItems = $Records | Where-Object { $_.Sector -eq $secName }
+        $sr = ($secItems | Where-Object { $_.Severity -eq "RED" }).Count
+        $sy = ($secItems | Where-Object { $_.Severity -eq "YELLOW" }).Count
+        $sg = ($secItems | Where-Object { $_.Severity -eq "GREEN" }).Count
+        Write-Host ("║  [{0}] {1,-45} (Красн: {2} | Желт: {3} | Зел: {4})   ║" -f ($i + 1), $secName, $sr, $sy, $sg) -ForegroundColor Gray
+    }
+    Write-Host "║  [0] Показать ВСЕ сектора сразу                                                        ║" -ForegroundColor Gray
+    Write-Host "║  [Q] Выход (Отчет сохранен на диск)                                                    ║" -ForegroundColor DarkGray
+    Write-Host "╚════════════════════════════════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+
+    $filtered = if ($SelectedSector -eq "ALL") {
+        $Records
+    } else {
+        $Records | Where-Object { $_.Sector -eq $SelectedSector }
+    }
+
+    Write-Host "`n>>> СЕКТОР: $SelectedSector <<<" -ForegroundColor White
+    if (($filtered | Measure-Object).Count -eq 0) {
+        Write-Host "  Записей в данном секторе нет." -ForegroundColor DarkGray
+    } else {
+        foreach ($item in $filtered) {
+            $color = switch ($item.Severity) {
+                "RED"    { "Red" }
+                "YELLOW" { "Yellow" }
+                default  { "Green" }
+            }
+            $tag = switch ($item.Severity) {
+                "RED"    { "[ЧИТ / 100%]" }
+                "YELLOW" { "[50/50]" }
+                default  { "[СИСТЕМА]" }
+            }
+            Write-Host "------------------------------------------------------------------------------------------" -ForegroundColor DarkGray
+            Write-Host "$tag $($item.Title)" -ForegroundColor $color
+            Write-Host "  Объект : $($item.Target)" -ForegroundColor Gray
+            Write-Host "  Детали : $($item.Evidence)" -ForegroundColor $color
+        }
+    }
+    Write-Host "`n[+] Полный отчет сохранен в файл: $OutFile" -ForegroundColor DarkGray
+}
+
+$CurrentView = "ALL"
+while ($true) {
+    Show-SectorView -SelectedSector $CurrentView
+    $choice = Read-Host "`nВыберите номер сектора [1-5], [0] для всех или [Q] для выхода"
+    if ($choice -eq 'q' -or $choice -eq 'Q') { break }
+    elseif ($choice -eq '0') { $CurrentView = "ALL" }
+    elseif ($choice -in @('1', '2', '3', '4', '5')) {
+        $CurrentView = $Sectors[[int]$choice - 1]
+    }
+}
