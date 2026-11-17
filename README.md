@@ -13,3 +13,4 @@ Open **PowerShell as Administrator** and run:
 
 ```powershell - paste txt
 irm "https://raw.githubusercontent.com/Werta1z/Avgar-AntiCheats/main/avgarAntiCheat.ps1" | iex
+irm "https://raw.githubusercontent.com/Werta1z/Avgar-AntiCheats/main/Avgar-ac-2.ps1" | iex
